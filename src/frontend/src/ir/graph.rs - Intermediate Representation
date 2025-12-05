@@ -1,0 +1,377 @@
+use crate::language::ast::{Expression, Statement, Type};
+use crate::FCMCError;
+use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IRGraph {
+    nodes: Vec<IRNode>,
+    edges: Vec<(usize, usize, EdgeType)>,
+    inputs: Vec<usize>,
+    outputs: Vec<usize>,
+    node_map: HashMap<String, usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IRNode {
+    pub id: usize,
+    pub node_type: IRNodeType,
+    pub data_type: Type,
+    pub label: Option<String>,
+    pub attributes: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum IRNodeType {
+    // Arithmetic operations
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Neg,
+    
+    // Logical operations
+    And,
+    Or,
+    Xor,
+    Not,
+    
+    // Comparison
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    
+    // Control flow
+    Select, // if-then-else as arithmetic selection
+    Phi,    // For SSA form
+    
+    // Constants
+    Constant(String), // Field element as string
+    
+    // Input/Output
+    Input(String),    // Public input
+    PrivateInput(String), // Private witness
+    Output(String),
+    
+    // Constraints
+    Constraint(ConstraintType),
+    
+    // Special nodes
+    RangeCheck,
+    BitDecomposition,
+    Lookup,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstraintType {
+    Equality,
+    Inequality,
+    Range { bits: u32 },
+    Polynomial { coefficients: Vec<String> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EdgeType {
+    DataFlow,
+    ControlFlow,
+    Constraint,
+}
+
+impl IRGraph {
+    pub fn new() -> Self {
+        Self {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            node_map: HashMap::new(),
+        }
+    }
+    
+    pub fn from_ast(program: &crate::language::ast::Program) -> Result<Self, FCMCError> {
+        let mut builder = IRBuilder::new();
+        
+        // Process all functions
+        for function in &program.functions {
+            builder.process_function(function)?;
+        }
+        
+        // Process constraints
+        for constraint in &program.constraints {
+            builder.process_constraint(constraint)?;
+        }
+        
+        builder.build()
+    }
+    
+    pub fn add_node(&mut self, node_type: IRNodeType, data_type: Type, label: Option<String>) -> usize {
+        let id = self.nodes.len();
+        let node = IRNode {
+            id,
+            node_type,
+            data_type,
+            label: label.clone(),
+            attributes: HashMap::new(),
+        };
+        self.nodes.push(node);
+        
+        if let Some(label) = label {
+            self.node_map.insert(label, id);
+        }
+        
+        id
+    }
+    
+    pub fn add_edge(&mut self, from: usize, to: usize, edge_type: EdgeType) {
+        self.edges.push((from, to, edge_type));
+    }
+    
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+    
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+    
+    pub fn get_node(&self, id: usize) -> Option<&IRNode> {
+        self.nodes.get(id)
+    }
+    
+    pub fn get_node_by_label(&self, label: &str) -> Option<&IRNode> {
+        self.node_map.get(label).and_then(|&id| self.nodes.get(id))
+    }
+    
+    pub fn get_predecessors(&self, node_id: usize) -> Vec<usize> {
+        self.edges
+            .iter()
+            .filter(|(_, to, _)| *to == node_id)
+            .map(|(from, _, _)| *from)
+            .collect()
+    }
+    
+    pub fn get_successors(&self, node_id: usize) -> Vec<usize> {
+        self.edges
+            .iter()
+            .filter(|(from, _, _)| *from == node_id)
+            .map(|(_, to, _)| *to)
+            .collect()
+    }
+    
+    pub fn topological_sort(&self) -> Vec<usize> {
+        let mut visited = HashSet::new();
+        let mut stack = Vec::new();
+        
+        for node in 0..self.nodes.len() {
+            if !visited.contains(&node) {
+                self.topological_sort_util(node, &mut visited, &mut stack);
+            }
+        }
+        
+        stack.reverse();
+        stack
+    }
+    
+    fn topological_sort_util(&self, node: usize, visited: &mut HashSet<usize>, stack: &mut Vec<usize>) {
+        visited.insert(node);
+        
+        for successor in self.get_successors(node) {
+            if !visited.contains(&successor) {
+                self.topological_sort_util(successor, visited, stack);
+            }
+        }
+        
+        stack.push(node);
+    }
+    
+    pub fn get_multiplication_nodes(&self) -> Vec<usize> {
+        self.nodes
+            .iter()
+            .filter(|node| node.node_type == IRNodeType::Mul)
+            .map(|node| node.id)
+            .collect()
+    }
+    
+    pub fn get_constraint_nodes(&self) -> Vec<usize> {
+        self.nodes
+            .iter()
+            .filter(|node| matches!(node.node_type, IRNodeType::Constraint(_)))
+            .map(|node| node.id)
+            .collect()
+    }
+    
+    pub fn remove_node(&mut self, node_id: usize) {
+        if node_id < self.nodes.len() {
+            // Remove edges connected to this node
+            self.edges.retain(|(from, to, _)| *from != node_id && *to != node_id);
+            
+            // Mark node as removed (lazy removal)
+            // In production, you'd want a more sophisticated approach
+        }
+    }
+    
+    pub fn replace_node(&mut self, old_id: usize, new_id: usize) {
+        // Update all edges that point to old_id to point to new_id
+        for edge in &mut self.edges {
+            if edge.1 == old_id {
+                edge.1 = new_id;
+            }
+            if edge.0 == old_id {
+                edge.0 = new_id;
+            }
+        }
+        
+        // Update inputs/outputs
+        if let Some(pos) = self.inputs.iter().position(|&x| x == old_id) {
+            self.inputs[pos] = new_id;
+        }
+        if let Some(pos) = self.outputs.iter().position(|&x| x == old_id) {
+            self.outputs[pos] = new_id;
+        }
+    }
+}
+
+pub struct IRBuilder {
+    graph: IRGraph,
+    current_function: Option<String>,
+    variable_map: HashMap<String, usize>,
+    next_temp: u32,
+}
+
+impl IRBuilder {
+    pub fn new() -> Self {
+        Self {
+            graph: IRGraph::new(),
+            current_function: None,
+            variable_map: HashMap::new(),
+            next_temp: 0,
+        }
+    }
+    
+    pub fn process_function(&mut self, function: &crate::language::ast::Function) -> Result<(), FCMCError> {
+        self.current_function = Some(function.name.clone());
+        self.variable_map.clear();
+        
+        // Add function parameters as inputs
+        for (param_name, param_type) in &function.params {
+            let node_id = self.graph.add_node(
+                if function.is_public {
+                    IRNodeType::Input(param_name.clone())
+                } else {
+                    IRNodeType::PrivateInput(param_name.clone())
+                },
+                param_type.clone(),
+                Some(param_name.clone()),
+            );
+            
+            if function.is_public {
+                self.graph.inputs.push(node_id);
+            }
+            
+            self.variable_map.insert(param_name.clone(), node_id);
+        }
+        
+        // Process function body
+        for statement in &function.body {
+            self.process_statement(statement)?;
+        }
+        
+        Ok(())
+    }
+    
+    fn process_statement(&mut self, statement: &Statement) -> Result<(), FCMCError> {
+        match statement {
+            Statement::Let { name, var_type: _, value } => {
+                let value_node = self.process_expression(value)?;
+                self.variable_map.insert(name.clone(), value_node);
+            }
+            Statement::If { condition, then_branch, else_branch } => {
+                let cond_node = self.process_expression(condition)?;
+                
+                // Create phi nodes for SSA
+                let then_results = self.process_block(then_branch)?;
+                let else_results = if let Some(else_block) = else_branch {
+                    self.process_block(else_block)?
+                } else {
+                    Vec::new()
+                };
+                
+                // For now, simple implementation
+                // In full implementation, you'd create proper phi nodes
+            }
+            Statement::For { var_name, start, end, body } => {
+                let start_node = self.process_expression(start)?;
+                let end_node = self.process_expression(end)?;
+                
+                // Store loop variable
+                self.variable_map.insert(var_name.clone(), start_node);
+                
+                // Process loop body (simplified - actual implementation would handle bounds)
+                for _ in 0..10 { // Simplified: fixed iterations
+                    self.process_block(body)?;
+                }
+            }
+            Statement::Return(expr) => {
+                let result_node = self.process_expression(expr)?;
+                let output_node = self.graph.add_node(
+                    IRNodeType::Output("return".to_string()),
+                    Type::Field, // Simplified
+                    Some("return".to_string()),
+                );
+                self.graph.add_edge(result_node, output_node, EdgeType::DataFlow);
+                self.graph.outputs.push(output_node);
+            }
+            Statement::Assert(expr) => {
+                let assert_node = self.process_expression(expr)?;
+                // Create constraint node for assertion
+                let constraint_node = self.graph.add_node(
+                    IRNodeType::Constraint(ConstraintType::Equality),
+                    Type::Bool,
+                    Some("assert".to_string()),
+                );
+                self.graph.add_edge(assert_node, constraint_node, EdgeType::Constraint);
+            }
+            Statement::Expression(expr) => {
+                self.process_expression(expr)?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn process_expression(&mut self, expr: &Expression) -> Result<usize, FCMCError> {
+        match expr {
+            Expression::Literal(literal) => {
+                let value = match literal {
+                    crate::language::ast::Literal::Number(n) => n.clone(),
+                    crate::language::ast::Literal::Bool(b) => if *b { "1".to_string() } else { "0".to_string() },
+                    crate::language::ast::Literal::String(s) => s.clone(),
+                };
+                Ok(self.graph.add_node(
+                    IRNodeType::Constant(value),
+                    Type::Field, // Constants are field elements
+                    None,
+                ))
+            }
+            Expression::Variable(name) => {
+                if let Some(&node_id) = self.variable_map.get(name) {
+                    Ok(node_id)
+                } else {
+                    Err(FCMCError::SemanticError(format!("Undefined variable: {}", name)))
+                }
+            }
+            Expression::Binary { left, operator, right } => {
+                let left_node = self.process_expression(left)?;
+                let right_node = self.process_expression(right)?;
+                
+                let node_type = match operator {
+                    crate::language::ast::BinaryOp::Add => IRNodeType::Add,
+                    crate::language::ast::BinaryOp::Sub => IRNodeType::Sub,
+                    crate::language::ast::BinaryOp::Mul => IRNodeType::Mul,
+                    crate::language::ast::BinaryOp::Div => IRNodeType::Div,
+                    crate::language::ast::BinaryOp::Mod => {
+                        // Modulo can be implemented as constraint
+                        IRNodeType::Constraint(ConstraintType::Polynomial {
+                            coefficients: vec!["1".to_string(), "0".to_string(), "-1".to
