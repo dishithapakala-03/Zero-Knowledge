@@ -1,0 +1,38 @@
+[package]
+name = "fcmc-compiler"
+version = "0.1.0"
+edition = "2021"
+authors = ["Dishitha Pakala <dishithapakala@gmail.com>"]
+description = "Formal Circuit Minimization Compiler for Zero-Knowledge Proofs"
+license = "Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+bellman = { version = "0.15", features = ["pairing"] }
+bls12_381 = "0.9"
+ff = "0.13"
+group = "0.13"
+pairing = "0.24"
+num-bigint = "0.4"
+num-traits = "0.2"
+rand = "0.8"
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+log = "0.4"
+env_logger = "0.10"
+clap = { version = "4.0", features = ["derive"] }
+itertools = "0.12"
+lazy_static = "1.4"
+regex = "1.9"
+indexmap = "2.0"
+
+[dev-dependencies]
+criterion = "0.5"
+proptest = "1.2"
+assert_matches = "1.5"
+
+[[bench]]
+name = "circuit_bench"
+harness = false
